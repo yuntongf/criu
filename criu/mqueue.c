@@ -23,12 +23,13 @@
 static int intrusive_mq_peek_all(int fd, struct mqueue_message *msgs, long nmsgs, long msgsize)
 {
     unsigned int prio;
-    int nmsg_read;
-    int old_flags;
-    
-    char *buf = malloc(msgsize);
+    int nmsg_read = 0;
+    int old_flags = -1;
+    char *buf = NULL;
+
+    buf = malloc(msgsize);
     if (!buf) {
-        pr_err("Failed to allocate message buffer\n");
+        pr_err("Failed to allocate message buffer of size %ld\n", msgsize);
         return -1;
     }
 
@@ -36,54 +37,60 @@ static int intrusive_mq_peek_all(int fd, struct mqueue_message *msgs, long nmsgs
     old_flags = fcntl(fd, F_GETFL);
     if (old_flags == -1) {
         pr_perror("fcntl F_GETFL failed");
-        free(buf);
-        return -1;
+        goto cleanup;
     }
 
     if (fcntl(fd, F_SETFL, old_flags | O_NONBLOCK) == -1) {
         pr_perror("fcntl F_SETFL O_NONBLOCK failed");
-        free(buf);
-        return -1;
+        goto cleanup;
     }
 
     /* Intrusively peek messages from queue */
-    for (nmsg_read = 0; nmsg_read < nmsgs; ++nmsg_read) {
+    while (nmsg_read < nmsgs) {
         ssize_t len = mq_receive(fd, buf, msgsize, &prio);
         if (len < 0) {
-            if (errno == EAGAIN)
-                break;  // queue drained
-            pr_perror("mq_receive failed");
-            break;
+            if (errno == EAGAIN) {
+                pr_info("Queue drained after reading %d messages\n", nmsg_read);
+                break;
+            }
+            pr_perror("mq_receive failed during intrusive peek");
+            goto restore;
         }
 
         msgs[nmsg_read].prio = prio;
         msgs[nmsg_read].len = len;
         msgs[nmsg_read].data = malloc(len);
         if (!msgs[nmsg_read].data) {
-            pr_err("Failed to allocate msg data buffer\n");
-            break;
+            pr_err("Failed to allocate memory for message %d\n", nmsg_read);
+            goto restore;
         }
+
         memcpy(msgs[nmsg_read].data, buf, len);
+        nmsg_read++;
     }
 
-    /* Restore the messages */
-    for (int j = 0; j < nmsg_read; j++) {
-        if (mq_send(fd, (char *)msgs[j].data, msgs[j].len, msgs[j].prio) < 0) {
-            pr_perror("mq_send failed while restoring messages during intrusive peek\n");
-            free(buf);
-            return -1;
+restore:
+    for (int i = 0; i < nmsg_read; i++) {
+        if (mq_send(fd, (char *)msgs[i].data, msgs[i].len, msgs[i].prio) < 0) {
+            pr_perror("mq_send failed while restoring message %d", i);
+            goto cleanup;
         }
     }
 
-    fcntl(fd, F_SETFL, old_flags);
-
+    if (old_flags != -1)
+        fcntl(fd, F_SETFL, old_flags);
     free(buf);
     return nmsg_read;
+
+cleanup:
+    if (old_flags != -1)
+        fcntl(fd, F_SETFL, old_flags);
+    free(buf);
+    return -1;
 }
 
-
 static int fill_mqueue_entry(MqueueEntry *entry, const char *name, const struct mq_attr *attr,
-    struct mqueue_message *msgs, int nmsgs, const struct fd_parms *p, u32 id, int lfd)
+        struct mqueue_message *msgs, int nmsgs, const struct fd_parms *p, u32 id, int lfd)
 {
     struct stat st;
 
@@ -144,11 +151,18 @@ int dump_mqueue_fd(struct fd_parms *p, int lfd, FdinfoEntry *e)
 {
     struct mq_attr attr;
     struct mqueue_message *msgs = NULL;
-    int nmsgs;
+    int nmsgs = 0;
     u32 id;
     MqueueEntry mfe = MQUEUE_ENTRY__INIT;
+    int ret = -1;
 
-    pr_info("Starting dump of mqueue FD %d (%s)\n", lfd, p->link ? p->link->name : "unknown");
+    if (!p || lfd < 0) {
+        pr_err("Invalid parameters to dump_mqueue_fd\n");
+        return -1;
+    }
+
+    pr_info("Starting dump of mqueue FD %d (%s)\n", lfd,
+            p->link ? p->link->name : "unknown");
 
     if (mq_getattr(lfd, &attr) < 0) {
         pr_perror("mq_getattr failed");
@@ -156,19 +170,24 @@ int dump_mqueue_fd(struct fd_parms *p, int lfd, FdinfoEntry *e)
     }
 
     pr_info("mq_getattr: maxmsg=%ld, msgsize=%ld, curmsgs=%ld\n", 
-        attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
+            attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
 
-    msgs = calloc(attr.mq_curmsgs, sizeof(struct mqueue_message));
-    if (!msgs)
-        return -1;
+    if (attr.mq_curmsgs > 0) {
+        msgs = calloc(attr.mq_curmsgs, sizeof(struct mqueue_message));
+        if (!msgs) {
+            pr_err("Failed to allocate memory for %ld mqueue messages\n", attr.mq_curmsgs);
+            return -1;
+        }
 
-    pr_info("Intrusively peek %ld messages\n", attr.mq_curmsgs);
-    nmsgs = intrusive_mq_peek_all(lfd, msgs, attr.mq_curmsgs, attr.mq_msgsize);
-    if (nmsgs < 0) {
-        pr_perror("mq_peek_all failed");
-        goto cleanup_msgs;
+        pr_info("Intrusively peeking %ld messages\n", attr.mq_curmsgs);
+        nmsgs = intrusive_mq_peek_all(lfd, msgs, attr.mq_curmsgs, attr.mq_msgsize);
+        if (nmsgs < 0) {
+            pr_perror("intrusive_mq_peek_all failed");
+            goto cleanup_msgs;
+        }
+
+        pr_info("Successfully peeked %d messages from mqueue\n", nmsgs);
     }
-    pr_info("Intrusively peeked %d messages from mqueue\n", nmsgs);
 
     fd_id_generate_special(p, &id);
     if (e) {
@@ -178,33 +197,35 @@ int dump_mqueue_fd(struct fd_parms *p, int lfd, FdinfoEntry *e)
         e->flags = p->fd_flags;
     }
 
-    if (fill_mqueue_entry(&mfe, p->link->name + 1, &attr, msgs, nmsgs, p, id, lfd) < 0) {
-        pr_err("Failed to prepare mqueue entry\n");
+    if (fill_mqueue_entry(&mfe, p->link ? p->link->name + 1 : "unknown",
+                          &attr, msgs, nmsgs, p, id, lfd) < 0) {
+        pr_err("Failed to fill mqueue protobuf entry\n");
         goto cleanup_msgs;
     }
 
     if (write_mqueue_image(&mfe, id) < 0) {
-        pr_err("Failed to write mqueue image\n");
+        pr_err("Failed to write mqueue image to protobuf\n");
         goto cleanup_entry;
     }
 
-    for (int i = 0; i < nmsgs; i++)
-            free(mfe.msgs[i]);
-    free(mfe.msgs);
-    free(msgs);
-    return 0;
+    ret = 0;
 
 cleanup_entry:
-    for (int i = 0; i < nmsgs; i++)
-    free(mfe.msgs[i]);
-    free(mfe.msgs);
-cleanup_msgs:
-    for (int i = 0; i < attr.mq_curmsgs; i++)
-        free(msgs[i].data);
-    free(msgs);
-    return -1;
-}
+    if (mfe.msgs) {
+        for (int i = 0; i < mfe.n_msgs; i++)
+            free(mfe.msgs[i]);
+        free(mfe.msgs);
+    }
 
+cleanup_msgs:
+    if (msgs) {
+        for (int i = 0; i < attr.mq_curmsgs; i++)
+            free(msgs[i].data);
+        free(msgs);
+    }
+
+    return ret;
+}
 
 static int mqueue_open(struct file_desc *d, int *new_fd)
 {
