@@ -50,6 +50,7 @@
 #include "fdstore.h"
 #include "bpfmap.h"
 #include "pidfd.h"
+#include "mqueue.h"
 
 #include "protobuf.h"
 #include "util.h"
@@ -523,6 +524,17 @@ static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts,
 
 	if (S_ISSOCK(p.stat.st_mode))
 		return dump_socket(&p, lfd, e);
+	
+	if (p.fs_type == POSIX_MQUEUE_MAGIC) {
+		if (fill_fdlink(lfd, &p, &link))
+			return -1;
+	
+		p.link = &link;
+	
+		pr_info("Dumping mqueue FD %d -> %s\n", fd, link.name);
+	
+		return dump_mqueue_fd(&p, lfd, e);
+	}
 
 	if (S_ISCHR(p.stat.st_mode))
 		return dump_chrdev(&p, lfd, e);
@@ -1788,6 +1800,9 @@ static int collect_one_file(void *o, ProtobufCMessage *base, struct cr_img *i)
 		break;
 	case FD_TYPES__PIDFD:
 		ret = collect_one_file_entry(fe, fe->pidfd->id, &fe->pidfd->base, &pidfd_cinfo);
+		break;
+	case FD_TYPES__PMQUEUE:
+		ret = collect_one_file_entry(fe, fe->mqueue->id, &fe->mqueue->base, &mqueue_cinfo);
 		break;
 #ifdef CONFIG_HAS_LIBBPF
 	case FD_TYPES__BPFMAP:

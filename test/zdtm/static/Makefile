@@ -176,6 +176,7 @@ TST_NOFILE	:=				\
 		tty02				\
 		tty03				\
 		poll				\
+		pmsgque				\
 		mountpoints			\
 		netns				\
 		netns-dev			\

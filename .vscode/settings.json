@@ -1,0 +1,14 @@
+{
+    "files.associations": {
+        "external.h": "c",
+        "util.h": "c",
+        "autofs.pb-c.h": "c",
+        "mqueue.h": "c",
+        "proc_parse.h": "c",
+        "files.h": "c",
+        "apparmor.pb-c.h": "c",
+        "typeinfo": "c",
+        "types.h": "c",
+        "ext-file.pb-c.h": "c"
+    }
+}

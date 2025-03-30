@@ -15,6 +15,7 @@
 #include <elf.h>
 #include <linux/fiemap.h>
 #include <linux/fs.h>
+#include <mqueue.h> 
 
 #include "tty.h"
 #include "stats.h"
@@ -1354,7 +1355,7 @@ static int check_path_remap(struct fd_link *link, const struct fd_parms *parms, 
 		}
 
 		return 0;
-	} else if (parms->fs_type == DEVPTS_SUPER_MAGIC) {
+	 } else if (parms->fs_type == DEVPTS_SUPER_MAGIC) {
 		/*
 		 * It's safe to call stripping here because
 		 * file paths are having predefined format for
