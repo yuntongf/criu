@@ -9,6 +9,11 @@
         "apparmor.pb-c.h": "c",
         "typeinfo": "c",
         "types.h": "c",
-        "ext-file.pb-c.h": "c"
+        "ext-file.pb-c.h": "c",
+        "fown.pb-c.h": "c",
+        "array": "c",
+        "string": "c",
+        "string_view": "c",
+        "protobuf-desc-gen.h": "c"
     }
 }

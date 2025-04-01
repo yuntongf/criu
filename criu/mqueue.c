@@ -20,7 +20,7 @@
 #include "mount.h"
 
 /* This function is temporary and will be changed to a kernel interface similar to MSG_PEEK for sockets */
-static int intrusive_mq_peek_all(int fd, struct mqueue_message *msgs, long nmsgs, long msgsize)
+int intrusive_mq_peek_all(int fd, struct mqueue_message *msgs, long nmsgs, long msgsize)
 {
     unsigned int prio;
     int nmsg_read = 0;
@@ -89,54 +89,40 @@ cleanup:
     return -1;
 }
 
-static int fill_mqueue_entry(MqueueEntry *entry, const char *name, const struct mq_attr *attr,
-        struct mqueue_message *msgs, int nmsgs, const struct fd_parms *p, u32 id, int lfd)
-{
-    struct stat st;
 
-    if (fstat(p->fd, &st) < 0) {
-        pr_perror("fstat failed");
-        return -1;
-    }
-
-    entry->id = id;
-    entry->ino = st.st_ino;
-    entry->mode = st.st_mode;
-    entry->open_flags = p->flags;
-    entry->fown = (FownEntry *)&p->fown;
-
-    entry->name = (char *)name;
-    entry->maxmsg = attr->mq_maxmsg;
-    entry->msgsize = attr->mq_msgsize;
-    entry->curmsgs = attr->mq_curmsgs;
-    entry->mq_flags = attr->mq_flags;
-
-    entry->msgs = calloc(nmsgs, sizeof(MqueueMessage *));
-    if (!entry->msgs)
-        return -1;
-
-    for (int i = 0; i < nmsgs; i++) {
-        MqueueMessage *msg = calloc(1, sizeof(MqueueMessage));
-        if (!msg)
-            return -1;
-        mqueue_message__init(msg);
-        msg->priority = msgs[i].prio;
-        msg->body.data = (uint8_t *)msgs[i].data;
-        msg->body.len = msgs[i].len;
-        entry->msgs[i] = msg;
-    }
-    entry->n_msgs = nmsgs;
-
-    return 0;
-}
-
-static int write_mqueue_image(const MqueueEntry *entry, u32 id)
-{
-    struct cr_img *img;
+int dump_pmq_fd(int lfd, struct fd_parms *p, FdinfoEntry *e) {
+    PmqfdEntry mfe = PMQFD_ENTRY__INIT;
     FileEntry fe = FILE_ENTRY__INIT;
-    fe.id = id;
-    fe.type = FD_TYPES__PMQUEUE;
-    fe.mqueue = (MqueueEntry *)entry;
+    struct mq_attr attr;
+    struct cr_img *img;
+
+    if (lfd < 0) {
+        pr_err("Invalid parameters to dump_mqueue_fd\n");
+        return -1;
+    }
+
+    pr_info("Starting dump of mqueue FD %d (%s)\n", lfd, p->link->name + 1);
+
+    if (fd_id_generate_special(p, &mfe.id) < 0) {
+        pr_err("Failed to generate special ID for PmqFileEntry\n");
+        return -1;
+    }
+    mfe.open_flags = p->flags;
+    mq_getattr(lfd, &attr);
+    mfe.mq_flags = attr.mq_flags;
+    mfe.name = p->link->name + 1;
+    mfe.fown = (FownEntry *)&p->fown;
+
+    fe.id = mfe.id;
+    fe.type = FD_TYPES__PMQFD;
+    fe.pmqfd = &mfe;
+
+    if (e) {
+        e->type = FD_TYPES__PMQFD;
+        e->id = mfe.id;
+        e->fd = p->fd;
+        e->flags = p->fd_flags;
+    }
 
     img = img_from_set(glob_imgset, CR_FD_FILES);
     if (!img) {
@@ -145,128 +131,30 @@ static int write_mqueue_image(const MqueueEntry *entry, u32 id)
     }
 
     return pb_write_one(img, &fe, PB_FILE);
+
 }
 
-int dump_mqueue_fd(struct fd_parms *p, int lfd, FdinfoEntry *e)
-{
-    struct mq_attr attr;
-    struct mqueue_message *msgs = NULL;
-    int nmsgs = 0;
-    u32 id;
-    MqueueEntry mfe = MQUEUE_ENTRY__INIT;
-    int ret = -1;
-
-    if (!p || lfd < 0) {
-        pr_err("Invalid parameters to dump_mqueue_fd\n");
-        return -1;
-    }
-
-    pr_info("Starting dump of mqueue FD %d (%s)\n", lfd,
-            p->link ? p->link->name : "unknown");
-
-    if (mq_getattr(lfd, &attr) < 0) {
-        pr_perror("mq_getattr failed");
-        return -1;
-    }
-
-    pr_info("mq_getattr: maxmsg=%ld, msgsize=%ld, curmsgs=%ld\n", 
-            attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
-
-    if (attr.mq_curmsgs > 0) {
-        msgs = calloc(attr.mq_curmsgs, sizeof(struct mqueue_message));
-        if (!msgs) {
-            pr_err("Failed to allocate memory for %ld mqueue messages\n", attr.mq_curmsgs);
-            return -1;
-        }
-
-        pr_info("Intrusively peeking %ld messages\n", attr.mq_curmsgs);
-        nmsgs = intrusive_mq_peek_all(lfd, msgs, attr.mq_curmsgs, attr.mq_msgsize);
-        if (nmsgs < 0) {
-            pr_perror("intrusive_mq_peek_all failed");
-            goto cleanup_msgs;
-        }
-
-        pr_info("Successfully peeked %d messages from mqueue\n", nmsgs);
-    }
-
-    fd_id_generate_special(p, &id);
-    if (e) {
-        e->type = FD_TYPES__PMQUEUE;
-        e->fd = p->fd;
-        e->id = id;
-        e->flags = p->fd_flags;
-    }
-
-    if (fill_mqueue_entry(&mfe, p->link ? p->link->name + 1 : "unknown",
-                          &attr, msgs, nmsgs, p, id, lfd) < 0) {
-        pr_err("Failed to fill mqueue protobuf entry\n");
-        goto cleanup_msgs;
-    }
-
-    if (write_mqueue_image(&mfe, id) < 0) {
-        pr_err("Failed to write mqueue image to protobuf\n");
-        goto cleanup_entry;
-    }
-
-    ret = 0;
-
-cleanup_entry:
-    if (mfe.msgs) {
-        for (int i = 0; i < mfe.n_msgs; i++)
-            free(mfe.msgs[i]);
-        free(mfe.msgs);
-    }
-
-cleanup_msgs:
-    if (msgs) {
-        for (int i = 0; i < attr.mq_curmsgs; i++)
-            free(msgs[i].data);
-        free(msgs);
-    }
-
-    return ret;
-}
-
-static int mqueue_open(struct file_desc *d, int *new_fd)
+static int open_pmq_fd(struct file_desc *d, int *new_fd)
 {
 	struct mqueue_file_info *info;
-	MqueueEntry *mfe;
-	struct mq_attr attr;
+	PmqfdEntry *mfe;
 	mqd_t mqd;
-    int oflags;
 	int fd;
 
 	info = container_of(d, struct mqueue_file_info, d);
 	mfe = info->mfe;
 
-	pr_info("Creating mqueue: %s\n", mfe->name);
+	pr_info("Opening mqueue: %s with flag %d\n", mfe->name, mfe->open_flags);
 
-	attr.mq_maxmsg  = mfe->maxmsg;
-	attr.mq_msgsize = mfe->msgsize;
-    attr.mq_flags   = 0;
-
-    oflags = mfe->open_flags | mfe->mq_flags;
-
-	mqd = mq_open(mfe->name, O_CREAT | oflags, mfe->mode, &attr);
+	mqd = mq_open(mfe->name, mfe->open_flags | mfe->mq_flags);
 	if (mqd == (mqd_t)-1) {
-		pr_perror("Can't reopen mqueue %s", mfe->name);
+		pr_perror("Can't open mqueue %s", mfe->name);
 		return -1;
-	}
-
-    pr_info("there are %ld messages in the queue\n", mfe->n_msgs);  
-
-	for (int i = 0; i < mfe->n_msgs; i++) {
-		MqueueMessage *msg = mfe->msgs[i];
-		if (mq_send(mqd, (char *)msg->body.data, msg->body.len, msg->priority) < 0) {
-			pr_perror("mq_send failed");
-			mq_close(mqd);
-			return -1;
-		}
 	}
 
 	fd = (int)mqd;
 
-	if (rst_file_params(fd, mfe->fown, mfe->open_flags)) {
+	if (rst_file_params(fd, mfe->fown, mfe->open_flags | mfe->mq_flags)) {
 		pr_perror("Can't restore params on mqueue %s", mfe->name);
 		close(fd);
 		return -1;
@@ -276,22 +164,22 @@ static int mqueue_open(struct file_desc *d, int *new_fd)
 	return 0;
 }
 
-static struct file_desc_ops mqueue_desc_ops = {
-	.type = FD_TYPES__PMQUEUE,
-	.open = mqueue_open,
+static struct file_desc_ops pmqfd_desc_ops = {
+	.type = FD_TYPES__PMQFD,
+	.open = open_pmq_fd,
 };
 
-static int collect_one_mqueue(void *obj, ProtobufCMessage *msg, struct cr_img *i) {
+static int collect_one_pmq_fd(void *obj, ProtobufCMessage *msg, struct cr_img *i) {
     struct mqueue_file_info *info = obj;
 
-    info->mfe = pb_msg(msg, MqueueEntry);
+    info->mfe = pb_msg(msg, PmqfdEntry);
 
-    return file_desc_add(&info->d, info->mfe->id, &mqueue_desc_ops);
+    return file_desc_add(&info->d, info->mfe->id, &pmqfd_desc_ops);
 }
 
-struct collect_image_info mqueue_cinfo = {
-	.fd_type = CR_FD_MQUEUE,
-	.pb_type = PB_MQUEUE,
+struct collect_image_info pmqfd_cinfo = {
+	.fd_type = CR_FD_PMQFD,
+	.pb_type = PB_PMQFD,
 	.priv_size = sizeof(struct mqueue_file_info),
-	.collect = collect_one_mqueue,
+	.collect = collect_one_pmq_fd,
 };

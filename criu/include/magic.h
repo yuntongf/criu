@@ -52,7 +52,8 @@
 #define ITIMERS_MAGIC	     0x57464056 /* Kostroma */
 #define POSIX_TIMERS_MAGIC   0x52603957 /* Lipetsk */
 #define SK_QUEUES_MAGIC	     0x56264026 /* Suzdal */
-#define MQUEUE_MAGIC	     0x57313938 
+#define PMQFD_MAGIC	     0x57313938 
+#define PMQ_DATA_MAGIC	     0x57313939
 #define UTSNS_MAGIC	     0x54473203 /* Smolensk */
 #define CREDS_MAGIC	     0x54023547 /* Kozelsk */
 #define IPC_VAR_MAGIC	     0x53115007 /* Samara */

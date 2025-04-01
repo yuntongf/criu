@@ -117,9 +117,9 @@ void cr_pb_init(void)
 	CR_PB_DESC(IDS, TaskKobjIds, task_kobj_ids);
 	CR_PB_DESC(SIGACT, Sa, sa);
 	CR_PB_DESC(SK_QUEUES, SkPacket, sk_packet);
-	CR_PB_DESC(MQUEUE, Mqueue, mqueue);
 	CR_PB_MDESC_INIT(cr_pb_descs[PB_IPCNS_MSG], IpcMsg, ipc_msg);
 	CR_PB_DESC(IPCNS_MSG_ENT, IpcMsg, ipc_msg);
+	CR_PB_DESC(IPCNS_PMQ_DATA, PmqData, pmq_data);
 	CR_PB_DESC(REMAP_FPATH, RemapFilePath, remap_file_path);
 	CR_PB_DESC(NETDEV, NetDevice, net_device);
 	CR_PB_MDESC_INIT(cr_pb_descs[PB_PAGEMAP_HEAD], PagemapHead, pagemap_head);

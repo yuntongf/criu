@@ -7,6 +7,7 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sched.h>
+#include <sys/mount.h>
 
 #include "util.h"
 #include "cr_options.h"
@@ -16,6 +17,7 @@
 #include "ipc_ns.h"
 #include "shmem.h"
 #include "types.h"
+#include "mqueue.h"
 
 #include "protobuf.h"
 #include "images/ipc-var.pb-c.h"
@@ -35,6 +37,10 @@
 
 #ifndef MSG_COPY
 #define MSG_COPY 040000
+#endif
+
+#ifndef MQUEUE_TEMP_MNT_PATH
+#define MQUEUE_TEMP_MNT_PATH "/ipc/mqueue"
 #endif
 
 static void pr_ipc_desc_entry(const IpcDescEntry *desc)
@@ -245,6 +251,50 @@ static int dump_ipc_msg_queue(struct cr_img *img, int id, const struct msqid_ds 
 		return ret;
 	}
 	return dump_ipc_msg_queue_messages(img, &msg, ds->msg_qnum);
+}
+
+static int ensure_ipc_ns_mqueue_mount(void)
+{
+	const char *mnt_path = MQUEUE_TEMP_MNT_PATH;
+	char line[512];
+	FILE *mnts;
+
+	// Create the parent directory
+	if (mkdir("/ipc", 0755) == -1 && errno != EEXIST) {
+		pr_perror("Failed to mkdir /ipc");
+		return -1;
+	}
+
+	// Create mount point
+	if (mkdir(mnt_path, 0755) == -1 && errno != EEXIST) {
+		pr_perror("Failed to mkdir %s", mnt_path);
+		return -1;
+	}
+
+	// Already mounted?
+	mnts = fopen("/proc/mounts", "r");
+	if (!mnts) {
+		pr_perror("Failed to open /proc/mounts");
+		return -1;
+	}
+
+	while (fgets(line, sizeof(line), mnts)) {
+		if (strstr(line, mnt_path) && strstr(line, "mqueue")) {
+			fclose(mnts);
+			pr_info("mqueue already mounted at %s\n", mnt_path);
+			return 0;
+		}
+	}
+	fclose(mnts);
+
+	// Perform the mount
+	if (mount("mqueue", mnt_path, "mqueue", 0, NULL) < 0) {
+		pr_perror("Failed to mount mqueue on %s", mnt_path);
+		return -1;
+	}
+
+	pr_info("Mounted mqueue at %s\n", mnt_path);
+	return 0;
 }
 
 static int dump_ipc_msg(struct cr_img *img)
@@ -500,6 +550,193 @@ err:
 	return ret;
 }
 
+static int fill_mqueue_entry(PmqDataEntry *entry, const char *name, const struct mq_attr *attr,
+	struct mqueue_message *msgs, int nmsgs, const struct fd_parms *p, int lfd)
+{
+	struct stat st;
+
+	if (fstat(p->fd, &st) < 0) {
+		pr_perror("fstat failed");
+		return -1;
+	}
+
+	entry->id = hash_mqueue_name(name);
+	entry->ino = st.st_ino;
+	entry->mode = st.st_mode;
+
+	entry->name = (char *)name;
+	entry->maxmsg = attr->mq_maxmsg;
+	entry->msgsize = attr->mq_msgsize;
+	entry->curmsgs = attr->mq_curmsgs;
+	entry->mq_flags = attr->mq_flags;
+
+	entry->msgs = calloc(nmsgs, sizeof(MqueueMessage *));
+	if (!entry->msgs)
+		return -1;
+
+	for (int i = 0; i < nmsgs; i++) {
+		MqueueMessage *msg = calloc(1, sizeof(MqueueMessage));
+		if (!msg)
+			return -1;
+		mqueue_message__init(msg);
+		msg->priority = msgs[i].prio;
+		msg->body.data = (uint8_t *)msgs[i].data;
+		msg->body.len = msgs[i].len;
+		entry->msgs[i] = msg;
+	}
+	entry->n_msgs = nmsgs;
+
+	return 0;
+}
+
+
+static int dump_ipc_pmq_msgs(struct cr_img * img, int lfd, struct fd_parms *p, char* name)
+{
+    struct mq_attr attr;
+    struct mqueue_message *msgs = NULL;
+    int nmsgs = 0;
+    PmqDataEntry mfe = PMQ_DATA_ENTRY__INIT;
+    int ret = -1;
+
+    if (lfd < 0) {
+        pr_err("Invalid parameters to dump_mqueue_fd\n");
+        return -1;
+    }
+
+    pr_info("Starting dump of mqueue FD %d (%s)\n", lfd, name);
+
+    if (mq_getattr(lfd, &attr) < 0) {
+        pr_perror("mq_getattr failed");
+        return -1;
+    }
+
+    pr_info("mq_getattr: maxmsg=%ld, msgsize=%ld, curmsgs=%ld\n", 
+            attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
+
+    if (attr.mq_curmsgs > 0) {
+        msgs = calloc(attr.mq_curmsgs, sizeof(struct mqueue_message));
+        if (!msgs) {
+            pr_err("Failed to allocate memory for %ld mqueue messages\n", attr.mq_curmsgs);
+            return -1;
+        }
+
+        pr_info("Intrusively peeking %ld messages\n", attr.mq_curmsgs);
+        nmsgs = intrusive_mq_peek_all(lfd, msgs, attr.mq_curmsgs, attr.mq_msgsize);
+        if (nmsgs < 0) {
+            pr_perror("intrusive_mq_peek_all failed");
+            goto cleanup_msgs;
+        }
+
+        pr_info("Successfully peeked %d messages from mqueue\n", nmsgs);
+    }
+
+	/* Fille mqueue entry before write to image */
+
+    if (fill_mqueue_entry(&mfe, name, &attr, msgs, nmsgs, p, lfd) < 0) {
+        pr_err("Failed to fill mqueue protobuf entry\n");
+        goto cleanup_msgs;
+    }
+
+    if (pb_write_one(img, &mfe, PB_IPCNS_PMQ_DATA) < 0) {
+        pr_err("Failed to write mqueue image to protobuf\n");
+        goto cleanup_entry;
+    }
+
+    ret = 0;
+
+cleanup_entry:
+    if (mfe.msgs) {
+        for (int i = 0; i < mfe.n_msgs; i++)
+            free(mfe.msgs[i]);
+        free(mfe.msgs);
+    }
+
+cleanup_msgs:
+    if (msgs) {
+        for (int i = 0; i < attr.mq_curmsgs; i++)
+            free(msgs[i].data);
+        free(msgs);
+    }
+
+    return ret;
+}
+
+
+static int dump_ipc_pmq(struct cr_img *img)
+{
+	DIR *dir;
+	int ret = 0;
+	struct dirent *entry;
+	int lfd;
+	struct fd_parms p;
+	char path[512];
+
+	/* TODO: Dump system settings for posix mqueue*/
+	// if (dump_mqueue_sysctls(img) < 0) {
+	// 	pr_err("Failed to dump mqueue sysctl tunables\n");
+	// 	ret = -1;
+	// }
+
+	/* Dump all posix mqueues */
+	pr_info("Dumping POSIX message queues\n");
+
+	if (ensure_ipc_ns_mqueue_mount() < 0) {
+		pr_err("Could not mount mqueue for IPC namespace\n");
+		return -1;
+	}
+
+	dir = opendir(MQUEUE_TEMP_MNT_PATH);
+	if (!dir) {
+		pr_perror("Failed to open mqueue directory %s", MQUEUE_TEMP_MNT_PATH);
+		return -1;
+	}
+
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s", MQUEUE_TEMP_MNT_PATH, entry->d_name);
+		lfd = open(path, O_RDWR | O_NONBLOCK);
+		if (lfd < 0) {
+			pr_perror("Failed to open mqueue file %s", path);
+			ret = -1;
+			continue;
+		}
+
+		pr_info("Dumping mqueue: %s\n", path);
+
+		p.fd = lfd;
+		p.flags = O_RDWR | O_NONBLOCK;
+		p.fd_flags = O_RDWR;
+		p.link = NULL;
+
+		if (fill_fdlink(lfd, &p, NULL) < 0) {
+			pr_err("Failed to fill fdlink for %s\n", path);
+			close(lfd);
+			ret = -1;
+			continue;
+		}
+
+		if (dump_ipc_pmq_msgs(img, lfd, &p, path) < 0) {
+			pr_err("Failed to dump mqueue %s\n", path);
+			ret = -1;
+		}
+
+		close(lfd);
+	}
+
+	closedir(dir);
+
+	if (umount2(MQUEUE_TEMP_MNT_PATH, MNT_DETACH) < 0)
+		pr_perror("Failed to unmount %s", MQUEUE_TEMP_MNT_PATH);
+	else
+		pr_info("Unmounted %s after dump\n", MQUEUE_TEMP_MNT_PATH);
+
+	pr_info("Dumping POSIX message queues completed\n");
+
+	return ret;
+}
+
 static int dump_ipc_data(const struct cr_imgset *imgset)
 {
 	int ret;
@@ -511,6 +748,9 @@ static int dump_ipc_data(const struct cr_imgset *imgset)
 	if (ret < 0)
 		return ret;
 	ret = dump_ipc_msg(img_from_set(imgset, CR_FD_IPCNS_MSG));
+	if (ret < 0)
+		return ret;
+	ret = dump_ipc_pmq(img_from_set(imgset, CR_FD_IPCNS_PMQ));
 	if (ret < 0)
 		return ret;
 	ret = dump_ipc_sem(img_from_set(imgset, CR_FD_IPCNS_SEM));
@@ -792,6 +1032,79 @@ err:
 	return ret;
 }
 
+static int prepare_one_ipc_pmq(struct cr_img *i, PmqDataEntry* pde) {
+	struct mq_attr attr;
+	mqd_t mqd;
+    int oflags;
+
+	pr_info("Creating mqueue: %s\n", pde->name);
+
+	attr.mq_maxmsg  = pde->maxmsg;
+	attr.mq_msgsize = pde->msgsize;
+    attr.mq_flags   = 0;
+
+    oflags = O_CREAT | O_RDWR | pde->mq_flags;
+
+	mqd = mq_open(pde->name, oflags, pde->mode, &attr);
+	if (mqd == (mqd_t)-1) {
+		pr_perror("Can't reopen mqueue %s", pde->name);
+		return -1;
+	}
+
+    pr_info("there are %ld messages in the queue\n", pde->n_msgs);  
+
+	for (int i = 0; i < pde->n_msgs; i++) {
+		MqueueMessage *msg = pde->msgs[i];
+		if (mq_send(mqd, (char *)msg->body.data, msg->body.len, msg->priority) < 0) {
+			pr_perror("mq_send failed");
+			mq_close(mqd);
+			return -1;
+		}
+	}
+    close(mqd);
+
+	return 0;
+}
+
+static int prepare_ipc_pmq(int pid) {
+	int ret;
+	struct cr_img *img;
+
+	pr_info("Restoring IPC POSIX message queues\n");
+	img = open_image(CR_FD_IPCNS_PMQ, O_RSTR, pid);
+	if (!img)
+		return -1;
+
+	while (1) {
+		PmqDataEntry *pde;
+
+		ret = pb_read_one_eof(img, &pde, PB_IPCNS_PMQ_DATA);
+		if (ret < 0) {
+			pr_err("Failed to read IPC messages queue\n");
+			ret = -EIO;
+			goto err;
+		}
+		if (ret == 0)
+			break;
+
+		// pr_info_ipc_msg_entry(msq);
+
+		ret = prepare_one_ipc_pmq(img, pde);
+		pmq_data_entry__free_unpacked(pde, NULL);
+
+		if (ret < 0) {
+			pr_err("Failed to prepare messages queue\n");
+			goto err;
+		}
+	}
+
+	close_image(img);
+	return 0;
+err:
+	close_image(img);
+	return ret;
+}
+
 static int restore_content(void *data, struct cr_img *img, const IpcShmEntry *shm)
 {
 	int ifd;
@@ -980,6 +1293,9 @@ int prepare_ipc_ns(int pid)
 	if (ret < 0)
 		return ret;
 	ret = prepare_ipc_sem(pid);
+	if (ret < 0)
+		return ret;
+	ret = prepare_ipc_pmq(pid);
 	if (ret < 0)
 		return ret;
 	return 0;

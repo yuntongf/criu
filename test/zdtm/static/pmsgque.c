@@ -8,7 +8,7 @@
 
 #include "zdtmtst.h"
 
-const char *test_doc = "Check that POSIX message queue works correctly";
+const char *test_doc = "Check that POSIX message queue works correctly with one message";
 const char *test_author = "August Fu <yuntongf@gmail.com>";
 char *mqname = "/testmq";
 

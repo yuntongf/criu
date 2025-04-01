@@ -530,10 +530,10 @@ static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts,
 			return -1;
 	
 		p.link = &link;
-	
+
 		pr_info("Dumping mqueue FD %d -> %s\n", fd, link.name);
-	
-		return dump_mqueue_fd(&p, lfd, e);
+		
+		return dump_pmq_fd(lfd, &p, e);
 	}
 
 	if (S_ISCHR(p.stat.st_mode))
@@ -1801,8 +1801,8 @@ static int collect_one_file(void *o, ProtobufCMessage *base, struct cr_img *i)
 	case FD_TYPES__PIDFD:
 		ret = collect_one_file_entry(fe, fe->pidfd->id, &fe->pidfd->base, &pidfd_cinfo);
 		break;
-	case FD_TYPES__PMQUEUE:
-		ret = collect_one_file_entry(fe, fe->mqueue->id, &fe->mqueue->base, &mqueue_cinfo);
+	case FD_TYPES__PMQFD:
+		ret = collect_one_file_entry(fe, fe->pmqfd->id, &fe->pmqfd->base, &pmqfd_cinfo);
 		break;
 #ifdef CONFIG_HAS_LIBBPF
 	case FD_TYPES__BPFMAP:

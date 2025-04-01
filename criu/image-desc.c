@@ -55,7 +55,6 @@ struct cr_fd_desc_tmpl imgset_template[CR_FD_MAX] = {
 	FD_ENTRY(PACKETSK,	"packetsk"),
 	FD_ENTRY(NETLINK_SK,	"netlinksk"),
 	FD_ENTRY_F(SK_QUEUES,	"sk-queues", O_NOBUF), /* lseeks the image */
-	FD_ENTRY_F(MQUEUE,	"mqueue", O_NOBUF), /* lseeks the image */
 	FD_ENTRY(ITIMERS,	"itimers-%u"),
 	FD_ENTRY(POSIX_TIMERS,	"posix-timers-%u"),
 	FD_ENTRY(CREDS,		"creds-%u"),
@@ -109,6 +108,8 @@ struct cr_fd_desc_tmpl imgset_template[CR_FD_MAX] = {
 	FD_ENTRY_F(BPFMAP_DATA,	"bpfmap-data", O_NOBUF),
 	FD_ENTRY(APPARMOR,	"apparmor"),
 	FD_ENTRY(PIDFD,		"pidfd"),
+	FD_ENTRY(PMQFD,		"pmqfd"),
+	FD_ENTRY_F(PMQ_DATA,	"pmq-data", O_NOBUF),
 
 	[CR_FD_STATS] = {
 		.fmt	= "stats-%s",

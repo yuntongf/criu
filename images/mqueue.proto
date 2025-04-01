@@ -7,22 +7,24 @@ message mqueue_message {
     required bytes body = 2;
 }
 
-message mqueue_entry {
+message pmq_data_entry {
     required uint32		id		= 1;
 	required uint32		ino		= 2;
     required uint32     mode    = 3;
-	required uint32		open_flags	= 4;
-    required fown_entry	fown		= 5;
 
-    required string name = 6;
-    required int64 maxmsg = 7;
-    required int64 msgsize = 8;
-    required int64 curmsgs = 9;
-    required uint32 mq_flags = 10;
+    required string name = 4;
+    required int64 maxmsg = 5;
+    required int64 msgsize = 6;
+    required int64 curmsgs = 7;
+    required uint32 mq_flags = 8;
 
-    repeated mqueue_message msgs = 11;
+    repeated mqueue_message msgs = 9;
+}
 
-    optional int32 mnt_id = 12 [default = -1]; // To map mount namespace
-    optional uint32 ns_id = 13; // To support multiple IPC namespaces
-    optional bool deleted = 14; // To reflect if mq_unlink() was called
+message pmqfd_entry {
+    required uint32		id		= 1;
+    required uint32		open_flags	= 2;
+    required uint32		mq_flags	= 3;
+    required fown_entry	fown		= 4;
+    required string name = 5;
 }
