@@ -19,7 +19,8 @@ int main(int argc, char **argv)
     struct mq_attr attr_check;
     char buf[128];
     unsigned int prio;
-    char msg[] = "test message";
+    const char *msg1 = "first message";
+    const char *msg2 = "second message";
 
     test_init(argc, argv);
 
@@ -35,21 +36,23 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    printf("Sending message to queue: %s\n", msg);
-    if (mq_send(mqd, msg, strlen(msg) + 1, 0) == -1) {
+    printf("Sending message to queue: %s\n", msg1);
+    if (mq_send(mqd, msg1, strlen(msg1) + 1, 0) == -1) {
         pr_perror("Can't send message to queue \"%s\"", mqname);
-        mq_close(mqd);
-        mq_unlink(mqname);
-        exit(1);
+        goto err;
+    }
+
+    printf("Sending message to queue: %s\n", msg2);
+    if (mq_send(mqd, msg2, strlen(msg2) + 1, 0) == -1) {
+        pr_perror("Can't send second message to queue \"%s\"", mqname);
+        goto err;
     }
 
     printf("mqueue fd is %d\n", mqd);
 
     if (mq_getattr(mqd, &attr) == -1) {
         pr_perror("Failed to get attributes of original queue");
-        mq_close(mqd);
-        mq_unlink(mqname);
-        exit(1);
+        goto err;
     }
 
     test_daemon();
@@ -58,44 +61,59 @@ int main(int argc, char **argv)
     printf("Checking message queue attributes\n");
     if (mq_getattr(mqd, &attr_check) == -1) {
         pr_perror("Can't get attributes of message queue \"%s\"", mqname);
-        mq_close(mqd);
-        mq_unlink(mqname);
-        exit(1);
+        goto err;
     }
 
     if (attr_check.mq_flags != attr.mq_flags) {
         fail("Mismatch: mq_flags (expected: %ld, actual: %ld)",
              attr.mq_flags, attr_check.mq_flags);
-        exit(1);
+        goto err;
     } else if (attr_check.mq_maxmsg != attr.mq_maxmsg) {
         fail("Mismatch: mq_maxmsg (expected: %ld, actual: %ld)",
              attr.mq_maxmsg, attr_check.mq_maxmsg);
+        goto err;
     } else if (attr_check.mq_msgsize != attr.mq_msgsize) {
         fail("Mismatch: mq_msgsize (expected: %ld, actual: %ld)",
              attr.mq_msgsize, attr_check.mq_msgsize);
+        goto err;
     } else if (attr_check.mq_curmsgs != attr.mq_curmsgs) {
         fail("Mismatch: mq_curmsgs (expected: %ld, actual: %ld)",
              attr.mq_curmsgs, attr_check.mq_curmsgs);
+        goto err;
     } 
 
-    printf("Receiving message from queue\n");
+    printf("Receiving first message from queue\n");
     if (mq_receive(mqd, buf, sizeof(buf), &prio) == -1) {
-        fail("Did not receive message from queue \"%s\"", mqname);
-        mq_close(mqd);
-        mq_unlink(mqname);
-        exit(1);
+        fail("Did not receive first message from queue \"%s\"", mqname);
+        goto err;
+    }
+    printf("First received message: %s\n", buf);
+    if (strcmp(buf, msg1)) {
+        fail("First received message \"%s\" != expected \"%s\"", buf, msg1);
+        goto err;
     }
 
-    printf("Comparing received message: %s\n", buf);
-    if (strcmp(buf, msg)) {
-        fail("Received message \"%s\" != sent message \"%s\"", buf, msg);
-        exit(1);
-    } else {
-        pass();
+    printf("Receiving second message from queue\n");
+    if (mq_receive(mqd, buf, sizeof(buf), &prio) == -1) {
+        fail("Did not receive second message from queue \"%s\"", mqname);
+        goto err;
     }
+    printf("Second received message: %s\n", buf);
+    if (strcmp(buf, msg2)) {
+        fail("Second received message \"%s\" != expected \"%s\"", buf, msg2);
+        goto err;
+    }
+
+    printf("All messages received successfully\n");
+    pass();
 
     mq_close(mqd);
     mq_unlink(mqname);
 
     return 0;
+
+err:
+    mq_close(mqd);
+    mq_unlink(mqname);
+    exit(1);
 }
