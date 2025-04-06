@@ -530,8 +530,6 @@ static int dump_one_file(struct pid *pid, int fd, int lfd, struct fd_opts *opts,
 			return -1;
 	
 		p.link = &link;
-
-		pr_info("Dumping mqueue FD %d -> %s\n", fd, link.name);
 		
 		return dump_pmq_fd(lfd, &p, e);
 	}

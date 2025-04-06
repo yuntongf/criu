@@ -97,14 +97,14 @@ int dump_pmq_fd(int lfd, struct fd_parms *p, FdinfoEntry *e) {
     struct cr_img *img;
 
     if (lfd < 0) {
-        pr_err("Invalid parameters to dump_mqueue_fd\n");
+        pr_err("Invalid lfd to dump_mqueue_fd\n");
         return -1;
     }
 
-    pr_info("Starting dump of mqueue FD %d (%s)\n", lfd, p->link->name + 1);
+    pr_info("Dumping POSIX message queue FD %d (%s)\n", lfd, p->link->name + 1);
 
     if (fd_id_generate_special(p, &mfe.id) < 0) {
-        pr_err("Failed to generate special ID for PmqFileEntry\n");
+        pr_err("Failed to generate special ID for PmqfdEntry\n");
         return -1;
     }
     mfe.open_flags = p->flags;
@@ -131,7 +131,6 @@ int dump_pmq_fd(int lfd, struct fd_parms *p, FdinfoEntry *e) {
     }
 
     return pb_write_one(img, &fe, PB_FILE);
-
 }
 
 static int open_pmq_fd(struct file_desc *d, int *new_fd)
