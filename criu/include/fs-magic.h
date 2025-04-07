@@ -29,6 +29,11 @@
 #define SOCKFS_MAGIC 0x534f434b
 #endif
 
+#ifndef POSIX_MQUEUE_MAGIC
+#define POSIX_MQUEUE_MAGIC 0x19800202
+#endif
+
+
 #ifndef DEVPTS_SUPER_MAGIC
 #define DEVPTS_SUPER_MAGIC 0x1cd1
 #endif

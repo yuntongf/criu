@@ -15,6 +15,7 @@
 #include <elf.h>
 #include <linux/fiemap.h>
 #include <linux/fs.h>
+#include <mqueue.h> 
 
 #include "tty.h"
 #include "stats.h"
